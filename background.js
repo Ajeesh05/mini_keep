@@ -1,5 +1,5 @@
 /**
- * @fileoverview Backgroud service worker for Mini Keep Chrome Extension
+ * @fileoverview Backgroud service worker for Mini keep extension
  * 
  * Always run in the background that connects all the tabs and the chrome extensions
  * 
@@ -15,7 +15,6 @@ let storeTimer = null;
 let currentBounds = null; // { left, top, width, height }
 
 const defaultBounds = { width: 575, left: 1325, top: 160, height: 850 };
-
 async function loadSettings() {
     try {
         const data = await chrome.storage.sync.get(STORAGE_KEY);
@@ -103,6 +102,34 @@ async function focusWindowById(winId) {
     }
 }
 
+async function getSafePopupBounds(rawBounds) {
+    try {
+        const displays = await chrome.system.display.getInfo();
+        const primary = displays.find(d => d.isPrimary) || displays[0];
+
+        const area = primary.workArea; // excludes taskbar/dock
+
+        const width = Math.min(rawBounds.width, area.width);
+        const height = Math.min(rawBounds.height, area.height);
+
+        const left = Math.max(
+            area.left,
+            Math.min(area.left + area.width - width, rawBounds.left)
+        );
+
+        const top = Math.max(
+            area.top,
+            Math.min(area.top + area.height - height, rawBounds.top)
+        );
+
+        return { left, top, width, height };
+    } catch (e) {
+        console.warn("getSafePopupBounds failed, using raw bounds:", e);
+        return rawBounds;
+    }
+}
+
+
 /**
  * Main open/focus routine:
  * - Try keepWindowId
@@ -131,16 +158,22 @@ async function openKeep() {
 
     // 3) No existing Keep window found -> create a new popup using remembered bounds
     await loadSettings();
-    const bounds = currentBounds ?? defaultBounds;
+
+    const rawBounds = {
+        left: (currentBounds?.left ?? defaultBounds.left),
+        top: (currentBounds?.top ?? defaultBounds.top),
+        width: (currentBounds?.width ?? defaultBounds.width),
+        height: (currentBounds?.height ?? defaultBounds.height)
+    };
+
+    const safeBounds = await getSafePopupBounds(rawBounds);
 
     const createData = {
         url: KEEP_URL,
         type: "popup",
-        left: bounds.left ?? defaultBounds.left,
-        top: bounds.top ?? defaultBounds.top,
-        width: bounds.width ?? defaultBounds.width,
-        height: bounds.height ?? defaultBounds.height
+        ...safeBounds
     };
+
 
     try {
         const win = await chrome.windows.create(createData);
