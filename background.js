@@ -1,19 +1,20 @@
-/* background.js
-   Service worker for Keep Side Popup (robust)
-   - Reuses existing Keep popups by windowId or by scanning windows.
-   - Restores/minimizes appropriately and brings the window to front.
-   - Remembers size/position across sessions.
-   - No auto-close logic.
-*/
+/**
+ * @fileoverview Backgroud service worker for Mini Keep Chrome Extension
+ * 
+ * Always run in the background that connects all the tabs and the chrome extensions
+ * 
+ * @author Ajeesh T
+ * @date 2025-10-19
+ */
 
-const KEEP_URL = "https://keep.google.com/";
+const KEEP_URL = "https://keep.google.com/?mini_keep=1";
 const STORAGE_KEY = "keep_window_bounds_v1";
 
 let keepWindowId = null;
 let storeTimer = null;
 let currentBounds = null; // { left, top, width, height }
 
-const defaultBounds = { width: 575, left: 1325, top: 160, height: 850 }; //{"height":853,"left":1325,"top":160,"width":575}
+const defaultBounds = { width: 575, left: 1325, top: 160, height: 850 };
 
 async function loadSettings() {
     try {
@@ -55,9 +56,10 @@ async function findExistingKeepWindow() {
                 for (const t of w.tabs) {
                     if (!t || !t.url) continue;
                     // match the Keep origin (startsWith) to be tolerant of paths/params
-                    if (t.url.startsWith(KEEP_URL)) {
+                    if (t.url && t.url.includes("mini_keep=1")) {
                         return w;
                     }
+
                 }
             }
         }
