@@ -233,7 +233,13 @@ chrome.windows.onBoundsChanged.addListener(async (changedWindow) => {
 chrome.action.onClicked.addListener(() => openKeep());
 
 // Keyboard shortcuts
-chrome.commands.onCommand.addListener(() => openKeep());
+chrome.commands.onCommand.addListener((command) => {
+    if (command === "close-keep") {
+        closeKeep();
+    } else {
+        openKeep();
+    }
+});
 
 
 // Initialize
