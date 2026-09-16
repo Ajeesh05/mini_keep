@@ -113,6 +113,9 @@ jobs:
       - name: Claude
         uses: anthropics/claude-code-action@v1
         with:
+          # Temporary while bootstrapping: the action hides Claude's output by
+          # default, which makes a failed run undiagnosable.
+          show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.brief.outputs.text }}
           claude_args: |
