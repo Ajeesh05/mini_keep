@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Test and build output
+dist/
+coverage/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+*.zip
+
+# Credentials - never commit these
+.env
+.env.*
+.clasprc.json
+.clasp.json
+*.pem
+key.json
+service-account*.json
+client_secret*.json
+
+# Agent scratch space
+.ai/
+.codex
+
+# OS / editor
+.DS_Store
+Thumbs.db
