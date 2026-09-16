@@ -1,0 +1,58 @@
+name: Task for the agent
+description: Something you want implemented, in the shape the agent works best from
+title: "[Task] "
+labels: ["awaiting-approval"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Filing this does not start anything. Comment `/approve` when you want it built.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What is true today, and why it needs changing. Point at files and functions where you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: ask
+    attributes:
+      label: Ask
+      description: What to change, as concretely as you can. Numbered steps work well.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How both of you will know it is done. What must keep working.
+      value: |
+        - `npm run check` and `npm run e2e` pass.
+        - Existing behaviour is unchanged except where stated above.
+        - No new permissions.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bump
+    attributes:
+      label: Expected version bump
+      options: ["patch - bug fix", "minor - backward-compatible feature", "major - breaking change", "none - no user-visible change"]
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: permissions
+    attributes:
+      label: Permissions
+      options:
+        - label: This needs a new permission or OAuth scope
+          required: false
+  - type: markdown
+    attributes:
+      value: |
+        If you ticked that box, the permission gate will block the pull request
+        until you comment `/approve-permissions` on this issue.

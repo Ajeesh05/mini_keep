@@ -1,0 +1,147 @@
+# Mobile approval.
+#
+# You comment a command on an issue; this reads it, checks you are allowed to
+# issue it, and acts. Comments are the verb because they are one tap from a
+# phone and leave an audit trail; labels are the state the workflows read.
+#
+# Commands:
+#   /approve              implement this issue now
+#   /approve --no-e2e     implement, skipping the browser suite this run
+#   /reject <reason>      decline and close, recording why
+#   /approve-permissions  allow the permission increase this issue needs
+#   /retry                run again after a failure
+#   /abort                stop; leave the branch for a human
+name: Approval
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  command:
+    # Issues only, never pull requests, and only comments that open with a
+    # slash - so ordinary discussion never starts a runner.
+    if: >-
+      github.event.issue.pull_request == null &&
+      startsWith(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.parse.outputs.action }}
+      attempt: ${{ steps.parse.outputs.attempt }}
+    steps:
+      - name: Only the repository owner may command this pipeline
+        env:
+          ASSOCIATION: ${{ github.event.comment.author_association }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # These repositories are public, so without this check any stranger
+          # could comment /approve and put code in front of your users. This is
+          # the single most important line in the pipeline.
+          if [ "$ASSOCIATION" != "OWNER" ]; then
+            echo "::error::$ACTOR is $ASSOCIATION, not OWNER - refusing."
+            gh issue comment "${{ github.event.issue.number }}" --body \
+              "@$ACTOR only the repository owner can command this pipeline." \
+              --repo "${{ github.repository }}" || true
+            exit 1
+          fi
+          echo "Command accepted from $ACTOR (OWNER)."
+
+      - name: Parse the command
+        id: parse
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          # First line only, so a command inside a longer comment still works
+          # but prose below it is never interpreted.
+          line=$(printf '%s' "$BODY" | head -n1 | tr -d '\r')
+          cmd=$(printf '%s' "$line" | awk '{print $1}')
+          rest=$(printf '%s' "$line" | cut -s -d' ' -f2-)
+
+          echo "command: $cmd"
+          case "$cmd" in
+            /approve)             action=implement ;;
+            /retry)               action=retry ;;
+            /reject)              action=reject ;;
+            /abort)               action=abort ;;
+            /approve-permissions) action=permissions ;;
+            *)                    action=ignore ;;
+          esac
+
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "reason=$rest" >> "$GITHUB_OUTPUT"
+          echo "attempt=$([ "$action" = retry ] && echo 2 || echo 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Apply it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          ACTION: ${{ steps.parse.outputs.action }}
+          REASON: ${{ steps.parse.outputs.reason }}
+        run: |
+          label_swap() {
+            for l in $2; do gh issue edit "$ISSUE" --repo "$REPO" --remove-label "$l" 2>/dev/null || true; done
+            for l in $1; do gh issue edit "$ISSUE" --repo "$REPO" --add-label "$l" 2>/dev/null || true; done
+          }
+
+          case "$ACTION" in
+            implement|retry)
+              label_swap "approved in-progress" "awaiting-approval rejected blocked/manual"
+              gh issue comment "$ISSUE" --repo "$REPO" --body \
+                "Approved. Implementation starting - I will comment here when the run finishes."
+              ;;
+
+            reject)
+              label_swap "rejected" "awaiting-approval approved in-progress"
+              body="Rejected."
+              [ -n "$REASON" ] && body="Rejected: $REASON"
+              gh issue comment "$ISSUE" --repo "$REPO" --body "$body"
+              gh issue close "$ISSUE" --repo "$REPO" --reason "not planned"
+              ;;
+
+            abort)
+              label_swap "blocked/manual" "in-progress approved"
+              gh issue comment "$ISSUE" --repo "$REPO" --body \
+                "Aborted. Any \`ai/\` branch for this issue is left in place for review."
+              ;;
+
+            permissions)
+              # CLAUDE.md forbids adding a permission unless this exact marker
+              # is in the issue body, so approving writes the marker rather
+              # than setting a flag the agent could read some other way.
+              current=$(gh issue view "$ISSUE" --repo "$REPO" --json body --jq .body)
+              if printf '%s' "$current" | grep -q 'PERMISSION CHANGE APPROVED'; then
+                echo "Already approved."
+              else
+                printf '%s\n\n---\n\nPERMISSION CHANGE APPROVED\n' "$current" > /tmp/body.md
+                gh issue edit "$ISSUE" --repo "$REPO" --body-file /tmp/body.md
+              fi
+              label_swap "" "needs-permission-approval"
+              gh issue comment "$ISSUE" --repo "$REPO" --body \
+                "Permission change approved and recorded in the issue body. Comment \`/approve\` to implement."
+              ;;
+
+            ignore)
+              echo "Not a pipeline command; nothing to do."
+              ;;
+          esac
+
+  implement:
+    needs: command
+    if: needs.command.outputs.action == 'implement' || needs.command.outputs.action == 'retry'
+    uses: ./.github/workflows/ai-implement.yml
+    with:
+      issue: ${{ github.event.issue.number }}
+      attempt: ${{ needs.command.outputs.attempt }}
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read

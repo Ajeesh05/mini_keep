@@ -9,6 +9,24 @@
 name: AI implement
 
 on:
+  # Called by approve.yml when you comment /approve. A reusable-workflow call
+  # rather than a dispatch: GITHUB_TOKEN is not permitted to trigger another
+  # workflow run, so dispatching would need a PAT purely to talk to ourselves.
+  workflow_call:
+    inputs:
+      issue:
+        description: Issue number this change answers
+        required: true
+        type: string
+      task:
+        description: What to do (overrides the issue body when set)
+        required: false
+        type: string
+      attempt:
+        description: Outer retry counter
+        required: false
+        default: "1"
+        type: string
   workflow_dispatch:
     inputs:
       issue:
@@ -18,7 +36,7 @@ on:
         description: What to do (overrides the issue body when set)
         required: false
       attempt:
-        description: Outer retry counter, managed by the orchestrator
+        description: Outer retry counter
         required: false
         default: "1"
   repository_dispatch:
@@ -43,14 +61,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      ISSUE: ${{ github.event.inputs.issue || github.event.client_payload.issue }}
-      TASK: ${{ github.event.inputs.task || github.event.client_payload.task }}
-      ATTEMPT: ${{ github.event.inputs.attempt || github.event.client_payload.attempt || '1' }}
+      ISSUE: ${{ inputs.issue || github.event.client_payload.issue }}
+      TASK: ${{ inputs.task || github.event.client_payload.task }}
+      ATTEMPT: ${{ inputs.attempt || github.event.client_payload.attempt || '1' }}
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # A push made with GITHUB_TOKEN does not trigger workflows, so the
+          # resulting pull request would show no checks. With AI_PUSH_TOKEN set,
+          # CI runs on the PR like any human's. Falls back gracefully when it is
+          # not configured - the in-workflow verification still gates the PR.
+          token: ${{ secrets.AI_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
       - uses: actions/setup-node@v5
         with:
