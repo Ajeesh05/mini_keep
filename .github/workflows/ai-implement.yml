@@ -120,9 +120,6 @@ jobs:
       - name: Claude
         uses: anthropics/claude-code-action@v1
         with:
-          # Temporary while bootstrapping: the action hides Claude's output by
-          # default, which makes a failed run undiagnosable.
-          show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ steps.brief.outputs.text }}
           claude_args: |
@@ -164,6 +161,7 @@ jobs:
           fi
 
       - name: Verify independently
+        id: verify
         if: steps.verdict.outputs.status == 'success'
         run: |
           # Trust nothing the agent said about its own work. These are the same
@@ -175,6 +173,7 @@ jobs:
           npm run e2e
 
       - name: Open a pull request
+        id: pr
         if: steps.verdict.outputs.status == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -224,24 +223,34 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERDICT: ${{ steps.verdict.outputs.status }}
+          VERIFY: ${{ steps.verify.outcome }}
+          PR: ${{ steps.pr.outcome }}
+          BRANCH: ${{ steps.branch.outputs.name }}
         run: |
-          status="${{ steps.verdict.outputs.status }}"
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          case "${{ job.status }}" in
-            success)
-              body="Implementation complete on \`${{ steps.branch.outputs.name }}\`. A pull request is open, with checks already run. [Run log]($run_url)"
-              ;;
-            *)
-              if [ "$status" = "blocked" ]; then
-                reason=$(jq -r '.blocked_reason // "not stated"' .ai/result.json 2>/dev/null || echo "not stated")
-                body=$(printf '**Stopped: needs a decision.**\n\n%s\n\nThe branch \`%s\` is preserved. Attempt %s.\n\n[Run log](%s)' \
-                  "$reason" "${{ steps.branch.outputs.name }}" "$ATTEMPT" "$run_url")
-              else
-                body=$(printf '**Run failed on attempt %s.**\n\nThe agent reported `%s`, but the checks did not pass, or the run errored before finishing.\n\n[Run log](%s)' \
-                  "$ATTEMPT" "${status:-unknown}" "$run_url")
-              fi
-              ;;
-          esac
+          # Name the step that actually failed. Reporting "the checks did not
+          # pass" when the checks passed and only the PR step failed sends you
+          # to the wrong place in the log.
+          if [ "${{ job.status }}" = "success" ]; then
+            body=$(printf 'Implementation complete on `%s`. A pull request is open; `npm run check` and `npm run e2e` both passed in this run.\n\n[Run log](%s)' \
+              "$BRANCH" "$run_url")
+          elif [ "$VERDICT" = "blocked" ]; then
+            reason=$(jq -r '.blocked_reason // "not stated"' .ai/result.json 2>/dev/null || echo "not stated")
+            body=$(printf '**Stopped: this needs a decision.**\n\n%s\n\nThe branch `%s` is preserved so the work is not lost. Attempt %s.\n\n[Run log](%s)' \
+              "$reason" "$BRANCH" "$ATTEMPT" "$run_url")
+          elif [ "$VERDICT" != "success" ]; then
+            body=$(printf '**Run failed on attempt %s: the agent did not complete its contract.**\n\nNo usable `.ai/result.json` was written (status: `%s`). Usually an error before the agent finished - check the log for authentication or tooling failures.\n\n[Run log](%s)' \
+              "$ATTEMPT" "${VERDICT:-none}" "$run_url")
+          elif [ "$VERIFY" = "failure" ]; then
+            body=$(printf '**Run failed on attempt %s: the agent reported success but verification disagreed.**\n\n`npm run check` or `npm run e2e` failed when re-run against the agent'"'"'s changes. The branch `%s` is preserved.\n\n[Run log](%s)' \
+              "$ATTEMPT" "$BRANCH" "$run_url")
+          elif [ "$PR" = "failure" ]; then
+            body=$(printf '**Checks passed, but the pull request could not be opened.**\n\nThe work is verified and pushed to `%s` - only the final step failed, so nothing needs redoing. Check repository settings (Actions must be allowed to create pull requests).\n\n[Run log](%s)' \
+              "$BRANCH" "$run_url")
+          else
+            body=$(printf '**Run failed on attempt %s** before finishing.\n\n[Run log](%s)' "$ATTEMPT" "$run_url")
+          fi
 
           gh issue comment "$ISSUE" --body "$body" || echo "Could not comment on #$ISSUE"
