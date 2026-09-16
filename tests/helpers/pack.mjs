@@ -9,8 +9,9 @@
  */
 
 import { readFileSync, mkdirSync, rmSync, cpSync, readdirSync, statSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { join, relative, resolve, dirname, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 
 /** Patterns excluded from every build regardless of project config. */
 const ALWAYS_EXCLUDE = [
@@ -42,8 +43,15 @@ const ALWAYS_EXCLUDE_FILES = [
 function shouldSkip(relPath, extraDirs, extraFiles) {
   const parts = relPath.split(sep)
   const top = parts[0]
+  const name = parts[parts.length - 1]
 
   if (ALWAYS_EXCLUDE.includes(top) || extraDirs.includes(top)) return true
+
+  // No dotfile belongs in a store upload - not .gitignore, not the lint and
+  // manifest baselines, not editor config. A packaged extension that carries
+  // repository plumbing is both larger and more revealing than it needs to be.
+  if (name.startsWith('.')) return true
+
   if (parts.length === 1) {
     if (ALWAYS_EXCLUDE_FILES.includes(relPath) || extraFiles.includes(relPath)) return true
     if (relPath.endsWith('.zip')) return true
@@ -90,11 +98,21 @@ export function packDir(root, outDir, options = {}) {
  * extra file attributes, entries added in sorted order.
  */
 export function packZip(root, outZip, options = {}) {
-  const stagingDir = `${outZip}.staging`
+  // zip runs with cwd set to the staging directory, so the output path must be
+  // absolute or it lands inside the staging tree (and its parent may not exist).
+  const absZip = resolve(root, outZip)
+  const stagingDir = `${absZip}.staging`
+
   const files = packDir(root, stagingDir, options)
 
-  rmSync(outZip, { force: true })
-  execFileSync('zip', ['-X', '-q', '-r', outZip, '.'], { cwd: stagingDir })
+  mkdirSync(dirname(absZip), { recursive: true })
+  rmSync(absZip, { force: true })
+  try {
+    execFileSync('zip', ['-X', '-q', '-r', absZip, '.'], { cwd: stagingDir, stdio: 'pipe' })
+  } catch (error) {
+    rmSync(stagingDir, { recursive: true, force: true })
+    throw new Error(`zip failed: ${error.stdout?.toString().trim() || error.message}`)
+  }
   rmSync(stagingDir, { recursive: true, force: true })
 
   return files
@@ -104,7 +122,11 @@ function readManifestVersion(root) {
   return JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')).version
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not string interpolation: a repo path containing spaces or
+// & percent-encodes in import.meta.url and would never match, silently
+// skipping the CLI block - which for a safety gate means passing by doing
+// nothing.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const args = process.argv.slice(2)
   const root = process.cwd()
   const dirIdx = args.indexOf('--dir')

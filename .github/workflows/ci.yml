@@ -1,0 +1,115 @@
+# Canonical CI for every chrome-extension project in the fleet.
+#
+# Source of truth is ext-automation/templates/ci.yml. Edit it there; a
+# project-local edit is overwritten by the next sync.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch. A superseded run is cancelled rather than left to compete
+# with its own replacement for the runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    # Runs first and alone: if a pull request touches the workflows, nothing
+    # else should run under the workflow definition it is proposing to change.
+    name: Guard
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Workflows and project config are immutable in an automated change
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"; echo "$changed" | sed 's/^/  /'
+
+          protected=$(echo "$changed" | grep -E '^\.github/|^project\.yml$' || true)
+          [ -z "$protected" ] && { echo "No protected paths touched."; exit 0; }
+
+          # A human may change these; the agent may not. The agent's branches
+          # are ai/*, so the check keys off the branch name.
+          case "${{ github.head_ref }}" in
+            ai/*)
+              echo "::error::This branch changes protected paths:"
+              echo "$protected" | sed 's/^/  /'
+              echo "::error::Workflows carry the deployment credentials' blast radius,"
+              echo "::error::and project.yml holds the permission baseline. An agent"
+              echo "::error::that can edit either can escape every other gate."
+              exit 1
+              ;;
+            *)
+              echo "::notice::Protected paths changed on a human branch - allowed, review carefully."
+              ;;
+          esac
+
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Manifest
+        run: npm run manifest
+
+      # The safety gate. Fails on any permission or host-permission growth
+      # beyond the baseline recorded in project.yml.
+      - name: Permission gate
+        run: npm run permissions
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        run: npm run e2e
+
+      - name: Package
+        run: npm run pack
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extension-${{ github.sha }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

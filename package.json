@@ -9,14 +9,18 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "check": "npm run lint && npm run test",
+    "check": "npm run lint && npm run manifest && npm run permissions && npm test",
     "lint:raw": "eslint .",
-    "lint:update": "node tests/helpers/lint-ratchet.mjs --update"
+    "lint:update": "node tests/helpers/lint-ratchet.mjs --update",
+    "manifest": "node tests/helpers/manifest-lint.mjs",
+    "permissions": "node tests/helpers/permission-diff.mjs",
+    "pack": "node tests/helpers/pack.mjs --zip dist/extension.zip"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
     "eslint": "^9.39.0",
     "globals": "^17.12.0",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "yaml": "^2.9.1"
   }
 }
