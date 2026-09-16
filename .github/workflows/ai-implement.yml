@@ -1,0 +1,237 @@
+# The autonomous implementation loop.
+#
+# Source of truth is ext-automation/templates/ai-implement.yml.
+#
+# Triggered by hand (workflow_dispatch) or by the orchestrator once an issue is
+# approved (repository_dispatch). Claude implements against the issue, the
+# workflow verifies the result independently, and only a verified change becomes
+# a pull request.
+name: AI implement
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number this change answers
+        required: true
+      task:
+        description: What to do (overrides the issue body when set)
+        required: false
+      attempt:
+        description: Outer retry counter, managed by the orchestrator
+        required: false
+        default: "1"
+  repository_dispatch:
+    types: [ai-implement]
+
+# Only one agent at a time in this repository. Cross-repository serialisation is
+# the orchestrator's job - GitHub concurrency groups cannot span repositories,
+# and a Pro subscription is one quota pool shared with interactive use.
+concurrency:
+  group: ai-implement
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ISSUE: ${{ github.event.inputs.issue || github.event.client_payload.issue }}
+      TASK: ${{ github.event.inputs.task || github.event.client_payload.task }}
+      ATTEMPT: ${{ github.event.inputs.attempt || github.event.client_payload.attempt || '1' }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Create working branch
+        id: branch
+        run: |
+          slug=$(echo "${TASK:-issue}" | tr '[:upper:]' '[:lower:]' \
+                 | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-40)
+          branch="ai/${ISSUE}-${slug:-change}"
+          git checkout -b "$branch"
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Build the task brief
+        id: brief
+        run: |
+          {
+            echo 'text<<PROMPT_EOF'
+            echo "Implement the change described below, following CLAUDE.md exactly."
+            echo
+            echo "Issue: #${ISSUE}"
+            echo "Repository: ${{ github.repository }}"
+            echo "Attempt: ${ATTEMPT}"
+            echo
+            echo "## Task"
+            echo
+            if [ -n "$TASK" ]; then
+              echo "$TASK"
+            else
+              gh issue view "$ISSUE" --json title,body \
+                --template '{{.title}}{{"\n\n"}}{{.body}}'
+            fi
+            echo
+            echo "## How this run is judged"
+            echo
+            echo "Run 'npm run check'. If the change touches anything a browser"
+            echo "exercises, run 'npm run e2e' too. Both must pass before you finish."
+            echo
+            echo "Write .ai/result.json as the last thing you do. This workflow"
+            echo "re-runs every check itself after you finish, so a result.json"
+            echo "claiming success that the checks contradict fails the run and"
+            echo "wastes the attempt. If you cannot get to green, or the task"
+            echo "needs a decision that is not yours, set status to blocked and"
+            echo "explain what you needed. That is a valid outcome."
+            echo
+            echo "Do not commit, push, or open a pull request. This workflow does"
+            echo "that once it has verified your work."
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: ${{ steps.brief.outputs.text }}
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 40
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Edit(./.github/**)",
+                  "Write(./.github/**)",
+                  "Edit(./project.yml)",
+                  "Write(./project.yml)",
+                  "Edit(./.eslint-baseline.json)",
+                  "Write(./.eslint-baseline.json)",
+                  "Edit(./.manifest-baseline.json)",
+                  "Write(./.manifest-baseline.json)"
+                ]
+              }
+            }
+
+      - name: Read the agent's own verdict
+        id: verdict
+        run: |
+          if [ ! -f .ai/result.json ]; then
+            echo "::error::No .ai/result.json - the agent did not finish its contract."
+            echo "status=missing" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          cat .ai/result.json
+          status=$(jq -r '.status // "missing"' .ai/result.json)
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "summary=$(jq -r '.summary // ""' .ai/result.json)" >> "$GITHUB_OUTPUT"
+          echo "bump=$(jq -r '.version_bump // "none"' .ai/result.json)" >> "$GITHUB_OUTPUT"
+
+          if [ "$status" = "blocked" ]; then
+            echo "::warning::Agent stopped: $(jq -r '.blocked_reason' .ai/result.json)"
+          fi
+
+      - name: Verify independently
+        if: steps.verdict.outputs.status == 'success'
+        run: |
+          # Trust nothing the agent said about its own work. These are the same
+          # checks CI runs, run again here because a push made with GITHUB_TOKEN
+          # does not trigger workflows, so the pull request would otherwise
+          # arrive unverified. (Phase 4 swaps in PROJECTS_PAT and this becomes
+          # belt-and-braces rather than the only gate.)
+          npm run check
+          npm run e2e
+
+      - name: Open a pull request
+        if: steps.verdict.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          SUMMARY=$(jq -r '.summary // empty' .ai/result.json)
+          BUMP=$(jq -r '.version_bump // "none"' .ai/result.json)
+          [ -n "$SUMMARY" ] || SUMMARY="Address #${ISSUE}"
+
+          # .ai/ is the agent's scratch contract, not part of the change.
+          rm -rf .ai
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "::error::Checks passed but nothing changed. Nothing to propose."
+            exit 1
+          fi
+
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+          git add -A
+
+          {
+            printf '%s\n\n' "$SUMMARY"
+            printf 'Closes #%s\n\n' "$ISSUE"
+            printf 'Version bump: %s\n' "$BUMP"
+            printf 'Verified in CI: npm run check, npm run e2e\n\n'
+            printf 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n'
+          } > /tmp/commit-msg.txt
+
+          git commit -F /tmp/commit-msg.txt
+          git push origin "$BRANCH"
+
+          {
+            printf 'Closes #%s\n\n' "$ISSUE"
+            printf '**Summary:** %s\n\n' "$SUMMARY"
+            printf '**Version bump:** %s\n\n' "$BUMP"
+            printf '### Verified in this run\n'
+            printf -- '- `npm run check` (lint, manifest, permission gate, unit tests)\n'
+            printf -- '- `npm run e2e` (Playwright, real Chromium)\n\n'
+            printf 'Opened by the AI implement workflow, attempt %s.\n' "$ATTEMPT"
+          } > /tmp/pr-body.md
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "$SUMMARY" --body-file /tmp/pr-body.md
+
+      - name: Report back on the issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          status="${{ steps.verdict.outputs.status }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          case "${{ job.status }}" in
+            success)
+              body="Implementation complete on \`${{ steps.branch.outputs.name }}\`. A pull request is open, with checks already run. [Run log]($run_url)"
+              ;;
+            *)
+              if [ "$status" = "blocked" ]; then
+                reason=$(jq -r '.blocked_reason // "not stated"' .ai/result.json 2>/dev/null || echo "not stated")
+                body=$(printf '**Stopped: needs a decision.**\n\n%s\n\nThe branch \`%s\` is preserved. Attempt %s.\n\n[Run log](%s)' \
+                  "$reason" "${{ steps.branch.outputs.name }}" "$ATTEMPT" "$run_url")
+              else
+                body=$(printf '**Run failed on attempt %s.**\n\nThe agent reported `%s`, but the checks did not pass, or the run errored before finishing.\n\n[Run log](%s)' \
+                  "$ATTEMPT" "${status:-unknown}" "$run_url")
+              fi
+              ;;
+          esac
+
+          gh issue comment "$ISSUE" --body "$body" || echo "Could not comment on #$ISSUE"
