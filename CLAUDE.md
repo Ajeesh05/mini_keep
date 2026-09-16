@@ -125,7 +125,12 @@ always better.
 - `status`: `"success"` or `"blocked"`
 - `version_bump`: `"patch"` bug fix · `"minor"` backward-compatible feature ·
   `"major"` breaking change · `"none"` no user-visible change.
-  Chrome versions are 1–4 dotted integers: `1.2.3-beta` is not a legal version.
+
+  **Report the bump; do not apply it.** Leave the `version` in `manifest.json`
+  alone. Release automation owns version numbers, so that they are assigned once
+  at release time rather than by each branch independently — two branches in
+  flight would otherwise both claim the same next version. Chrome versions are
+  1–4 dotted integers, so `1.2.3-beta` is never a legal value anyway.
 - `permission_changes`: every permission or scope added, `[]` if none
 - `blocked_reason`: required when blocked — what you needed and could not decide
 
