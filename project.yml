@@ -1,0 +1,34 @@
+name: mini-keep
+type: chrome-extension
+
+# audit  - propose findings only, never write code
+# propose - may implement, always via a PR you review
+# full    - may implement and auto-merge on green CI
+autonomy: full
+
+source:
+  root: .
+
+store:
+  # Filled in once D1 is answered (Developer Dashboard -> the extension -> URL).
+  publisher_id: null
+  item_id: null
+
+permissions:
+  # The safety gate compares every PR against this list. Growth halts the
+  # pipeline until you comment /approve-permissions.
+  baseline:
+    - storage
+    - windows
+    - system.display
+  host_baseline: []
+
+test:
+  unit: true
+  e2e: true
+
+versioning:
+  strategy: semver
+
+retry:
+  max_dispatches: 2
