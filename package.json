@@ -5,11 +5,13 @@
   "type": "module",
   "description": "Open Google Keep in a resizable side popup window.",
   "scripts": {
-    "lint": "eslint .",
+    "lint": "node tests/helpers/lint-ratchet.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "check": "npm run lint && npm run test"
+    "check": "npm run lint && npm run test",
+    "lint:raw": "eslint .",
+    "lint:update": "node tests/helpers/lint-ratchet.mjs --update"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",

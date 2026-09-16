@@ -8,11 +8,40 @@
  * and delegates to an implementation you can override per test.
  */
 
-/** A callable that records its arguments. */
-export function spy(impl) {
+/**
+ * A callable that records its arguments and works in both chrome API styles.
+ *
+ * MV3 exposes most APIs as both promise-returning and callback-taking, and
+ * extensions mix the two freely - gmeet_kit is callback-style throughout while
+ * cookie_editor is promise-style. If the last argument is a function it is
+ * treated as the callback, invoked asynchronously with the result, and left out
+ * of `calls` so assertions read the same in either style.
+ *
+ * A rejected implementation surfaces the way Chrome surfaces it: the callback
+ * still fires, with chrome.runtime.lastError set for the duration of the call.
+ */
+export function spy(impl, runtimeRef) {
   const fn = (...args) => {
+    const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null
     fn.calls.push(args)
-    return impl ? impl(...args) : undefined
+
+    if (!callback) return impl ? impl(...args) : undefined
+
+    Promise.resolve()
+      .then(() => (impl ? impl(...args) : undefined))
+      .then(
+        result => callback(result),
+        error => {
+          const runtime = runtimeRef?.()
+          if (runtime) runtime.lastError = { message: error?.message || String(error) }
+          try {
+            callback(undefined)
+          } finally {
+            if (runtime) runtime.lastError = undefined
+          }
+        }
+      )
+    return undefined
   }
   fn.calls = []
   fn.reset = () => {
@@ -47,11 +76,15 @@ export function createEvent() {
 }
 
 /** In-memory chrome.storage area backed by a plain object. */
-function createStorageArea(initial = {}) {
+function createStorageArea(initial = {}, runtimeRef) {
   let store = { ...initial }
 
+  // Every area spy shares the runtime reference, so a failing storage call
+  // sets chrome.runtime.lastError for callback-style callers.
+  const areaSpy = impl => spy(impl, runtimeRef)
+
   const area = {
-    get: spy(async keys => {
+    get: areaSpy(async keys => {
       if (keys === null || keys === undefined) return { ...store }
       if (typeof keys === 'string') {
         return keys in store ? { [keys]: store[keys] } : {}
@@ -66,13 +99,13 @@ function createStorageArea(initial = {}) {
       for (const k of Object.keys(keys)) if (k in store) out[k] = store[k]
       return out
     }),
-    set: spy(async items => {
+    set: areaSpy(async items => {
       store = { ...store, ...items }
     }),
-    remove: spy(async keys => {
+    remove: areaSpy(async keys => {
       for (const k of [].concat(keys)) delete store[k]
     }),
-    clear: spy(async () => {
+    clear: areaSpy(async () => {
       store = {}
     }),
     /** Test-only: read the backing object directly. */
@@ -96,6 +129,9 @@ function createStorageArea(initial = {}) {
  * @param {object}   [opts.localStorage] seed for chrome.storage.local
  */
 export function createChromeMock(opts = {}) {
+  // Late-bound so spies can set chrome.runtime.lastError on failure.
+  let built = null
+  const runtimeRef = () => built?.runtime
   const state = {
     windows: [...(opts.windows || [])],
     tabs: [...(opts.tabs || [])],
@@ -120,12 +156,12 @@ export function createChromeMock(opts = {}) {
       getURL: spy(path => `chrome-extension://test-extension-id/${path}`),
       connect: spy(() => ({
         name: 'content',
-        postMessage: spy(),
-        disconnect: spy(),
+        postMessage: spy(undefined, runtimeRef),
+        disconnect: spy(undefined, runtimeRef),
         onMessage: createEvent(),
         onDisconnect: createEvent()
       })),
-      sendMessage: spy(async () => undefined),
+      sendMessage: spy(async () => undefined, runtimeRef),
       onMessage: createEvent(),
       onConnect: createEvent(),
       onInstalled: createEvent(),
@@ -133,15 +169,15 @@ export function createChromeMock(opts = {}) {
     },
 
     storage: {
-      sync: createStorageArea(opts.syncStorage),
-      local: createStorageArea(opts.localStorage),
-      session: createStorageArea(),
+      sync: createStorageArea(opts.syncStorage, runtimeRef),
+      local: createStorageArea(opts.localStorage, runtimeRef),
+      session: createStorageArea({}, runtimeRef),
       onChanged: createEvent()
     },
 
     windows: {
       WINDOW_ID_NONE: -1,
-      getAll: spy(async () => state.windows.map(w => ({ ...w }))),
+      getAll: spy(async () => state.windows.map(w => ({ ...w })), runtimeRef),
       get: spy(async id => {
         const win = state.windows.find(w => w.id === id)
         if (!win) throw new Error(`No window with id: ${id}`)
@@ -179,30 +215,30 @@ export function createChromeMock(opts = {}) {
         if (!tab) throw new Error(`No tab with id: ${id}`)
         return { ...tab }
       }),
-      create: spy(async props => ({ id: 999, ...props })),
-      remove: spy(async () => undefined),
-      sendMessage: spy(async () => undefined),
+      create: spy(async props => ({ id: 999, ...props }), runtimeRef),
+      remove: spy(async () => undefined, runtimeRef),
+      sendMessage: spy(async () => undefined, runtimeRef),
       onUpdated: createEvent(),
       onRemoved: createEvent(),
       onActivated: createEvent()
     },
 
     cookies: {
-      getAll: spy(async () => []),
-      get: spy(async () => null),
-      set: spy(async details => ({ ...details })),
-      remove: spy(async details => ({ ...details }))
+      getAll: spy(async () => [], runtimeRef),
+      get: spy(async () => null, runtimeRef),
+      set: spy(async details => ({ ...details }), runtimeRef),
+      remove: spy(async details => ({ ...details }), runtimeRef)
     },
 
     scripting: {
-      executeScript: spy(async ({ func, args = [] }) => [{ result: func ? func(...args) : undefined }])
+      executeScript: spy(async ({ func, args = [] }) => [{ result: func ? func(...args) : undefined }], runtimeRef)
     },
 
     action: {
       onClicked: createEvent(),
-      setIcon: spy(),
-      setTitle: spy(),
-      setBadgeText: spy()
+      setIcon: spy(undefined, runtimeRef),
+      setTitle: spy(undefined, runtimeRef),
+      setBadgeText: spy(undefined, runtimeRef)
     },
 
     commands: {
@@ -210,17 +246,18 @@ export function createChromeMock(opts = {}) {
     },
 
     sidePanel: {
-      open: spy(async () => undefined),
-      setOptions: spy(async () => undefined),
-      setPanelBehavior: spy(async () => undefined)
+      open: spy(async () => undefined, runtimeRef),
+      setOptions: spy(async () => undefined, runtimeRef),
+      setPanelBehavior: spy(async () => undefined, runtimeRef)
     },
 
     system: {
       display: {
-        getInfo: spy(async () => state.displays.map(d => ({ ...d })))
+        getInfo: spy(async () => state.displays.map(d => ({ ...d })), runtimeRef)
       }
     }
   }
 
+  built = chrome
   return chrome
 }
