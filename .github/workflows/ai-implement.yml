@@ -64,9 +64,16 @@ jobs:
 
       - name: Create working branch
         id: branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          slug=$(echo "${TASK:-issue}" | tr '[:upper:]' '[:lower:]' \
-                 | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-40)
+          # Name the branch after the issue title when no inline task was given,
+          # so branches read as ai/12-close-keep-shortcut rather than ai/12-issue.
+          source_text="$TASK"
+          [ -n "$source_text" ] || source_text=$(gh issue view "$ISSUE" --json title --jq .title)
+
+          slug=$(echo "$source_text" | tr '[:upper:]' '[:lower:]' \
+                 | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-40 | sed -E 's/-+$//')
           branch="ai/${ISSUE}-${slug:-change}"
           git checkout -b "$branch"
           echo "name=$branch" >> "$GITHUB_OUTPUT"
