@@ -256,6 +256,37 @@ describe('window event listeners', () => {
   })
 })
 
+describe('commands.onCommand routing', () => {
+  it('closes the tracked window when the close-keep command fires', async () => {
+    const { chrome, sw } = loadBackground({ windows: [], displays: [display()] })
+    await sw.openKeep()
+    const createdId = chrome._state.windows.at(-1).id
+
+    await chrome.commands.onCommand.emit('close-keep')
+
+    expect(chrome.windows.remove.calls).toContainEqual([createdId])
+  })
+
+  it('does not close the tracked window for an unknown command', async () => {
+    const { chrome, sw } = loadBackground({ windows: [], displays: [display()] })
+    await sw.openKeep()
+
+    await chrome.commands.onCommand.emit('some-other-command')
+
+    expect(chrome.windows.remove.calls).toHaveLength(0)
+  })
+
+  it('still opens Keep after it has been closed via the shortcut', async () => {
+    const { chrome, sw } = loadBackground({ windows: [], displays: [display()] })
+    await sw.openKeep()
+    await chrome.commands.onCommand.emit('close-keep')
+
+    await chrome.action.onClicked.emit()
+
+    expect(chrome.windows.create.calls).toHaveLength(2)
+  })
+})
+
 describe('scheduleStoreBounds', () => {
   it('debounces rapid drags into a single write', async () => {
     vi.useFakeTimers()
