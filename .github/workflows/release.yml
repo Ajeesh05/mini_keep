@@ -1,0 +1,118 @@
+# Cuts a release: assigns the version, writes the changelog, tags, and publishes
+# a GitHub release with the packaged zip attached.
+#
+# Deliberately stops there. Nothing in this workflow can reach the Chrome Web
+# Store - those credentials live only in ext-automation, in workflows that run
+# no agent at all.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        required: true
+        type: choice
+        options: [patch, minor, major]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AI_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Decide whether this commit releases anything
+        id: decide
+        run: |
+          if [ -n "${{ inputs.bump }}" ]; then
+            echo "bump=${{ inputs.bump }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          subject=$(git log -1 --pretty=%B)
+
+          # Never release a release commit - that would loop.
+          if printf '%s' "$subject" | head -n1 | grep -q '^Release v'; then
+            echo "bump=none" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # ai-implement records the agent's judgement in the merge commit.
+          bump=$(printf '%s' "$subject" | grep -oiE 'Version bump: (patch|minor|major)' \
+                 | head -n1 | awk '{print tolower($3)}')
+          echo "bump=${bump:-none}" >> "$GITHUB_OUTPUT"
+          echo "Detected bump: ${bump:-none}"
+
+      - uses: actions/setup-node@v5
+        if: steps.decide.outputs.bump != 'none'
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+        if: steps.decide.outputs.bump != 'none'
+
+      - name: Verify before releasing
+        if: steps.decide.outputs.bump != 'none'
+        run: |
+          # main is already tested, but a release is the last point at which a
+          # mistake is cheap. Re-running costs a minute.
+          npm run check
+
+      - name: Assign the version
+        id: version
+        if: steps.decide.outputs.bump != 'none'
+        run: node tests/helpers/version-bump.mjs "${{ steps.decide.outputs.bump }}"
+
+      - name: Package
+        if: steps.decide.outputs.bump != 'none'
+        run: npm run pack
+
+      - name: Tag and publish the release
+        if: steps.decide.outputs.bump != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json package.json CHANGELOG.md
+
+          {
+            printf 'Release v%s\n\n' "$VERSION"
+            printf 'Bumped from %s by the release workflow.\n\n' "$PREVIOUS"
+            printf 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n'
+          } > /tmp/release-msg.txt
+
+          git commit -F /tmp/release-msg.txt
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin main --follow-tags
+
+          # The changelog section for this version becomes the release notes.
+          awk "/^## ${VERSION} /{flag=1; next} /^## /{flag=0} flag" CHANGELOG.md > /tmp/notes.md
+          [ -s /tmp/notes.md ] || echo "See the changelog." > /tmp/notes.md
+
+          gh release create "v${VERSION}" dist/*.zip \
+            --title "v${VERSION}" --notes-file /tmp/notes.md
+
+      - name: Summarise
+        if: steps.decide.outputs.bump != 'none'
+        run: |
+          {
+            echo "### Released v${{ steps.version.outputs.version }}"
+            echo
+            echo "Packaged and tagged. **Not submitted to the Chrome Web Store** -"
+            echo "that is a separate, credential-holding workflow in ext-automation."
+          } >> "$GITHUB_STEP_SUMMARY"
