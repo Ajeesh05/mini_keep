@@ -113,11 +113,18 @@ export function applyBump(root, bump) {
   const current = manifest.version
   const version = nextVersion(current, bump)
 
-  // Preserve the file's own formatting habits rather than reformatting it.
+  // Preserve the file's own indentation rather than reformatting it. Rewriting
+  // a 4-space manifest as 2-space turns a one-line version change into a
+  // whole-file diff, which buries what actually changed.
   const raw = readFileSync(manifestPath, 'utf8')
-  const indent = /^\s*\n?\s*"/.test(raw) ? (raw.match(/\n(\s+)"/)?.[1].length ?? 2) : 2
+  const firstIndented = raw.match(/\n([ \t]+)\S/)
+  const indent = firstIndented ? firstIndented[1] : 2
+
+  // Match the original's trailing newline, or absence of one.
+  const trailing = raw.endsWith('\n') ? '\n' : ''
+
   manifest.version = version
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, indent)}\n`)
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, indent) + trailing)
 
   const pkgPath = join(root, 'package.json')
   if (existsSync(pkgPath)) {
