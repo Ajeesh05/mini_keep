@@ -11,8 +11,8 @@ source:
 
 store:
   # Filled in once D1 is answered (Developer Dashboard -> the extension -> URL).
-  publisher_id: null
-  item_id: null
+  publisher_id: "256487ad-a5b8-4f55-a685-1070701ad9ba"
+  item_id: "jjhdkaikhoiadalakkhmehjmobjeajcd"
 
 permissions:
   # The safety gate compares every PR against this list. Growth halts the
