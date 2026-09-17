@@ -40,23 +40,46 @@ export function nextVersion(current, bump) {
 
 const readJson = p => JSON.parse(readFileSync(p, 'utf8'))
 
-/** Commit subjects since the last tag, minus the noise nobody reads. */
+/**
+ * Commit subjects since the last tag that changed something a user could see.
+ *
+ * A changelog listing "Add lint ratchet" and "Name AI branches after the issue
+ * title" is worse than no changelog: it buries the one line that matters. So a
+ * commit counts only if it touched a file that actually ships - anything under
+ * tests/, .github/, or the various config and dotfiles is infrastructure.
+ */
+const SHIPS_NOT = [
+  /^tests?\//,
+  /^\.github\//,
+  /^\./,
+  /^docs\//,
+  /^(package(-lock)?\.json|.*\.config\.js|project\.yml|CLAUDE\.md|CHANGELOG\.md|README\.md)$/
+]
+
+const shipsToUsers = file => file && !SHIPS_NOT.some(pattern => pattern.test(file))
+
 export function changesSinceLastTag(root) {
-  const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
-  let range = ''
+  const git = args =>
+    execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+
+  let range = []
   try {
-    range = `${git(['describe', '--tags', '--abbrev=0'])}..HEAD`
+    range = [`${git(['describe', '--tags', '--abbrev=0'])}..HEAD`]
   } catch {
-    range = '' // no tags yet: take everything
+    range = [] // no tags yet: everything counts
   }
 
-  const log = git(['log', '--no-merges', '--pretty=format:%s', ...(range ? [range] : [])])
+  // %x00 separates commits so a subject containing newlines cannot confuse us.
+  const log = git(['log', '--no-merges', '--name-only', '--pretty=format:%x00%s', ...range])
+
   return log
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .filter(line => !/^Release v/.test(line))
-    .filter(line => !/^(chore|ci|docs)[:(]/i.test(line))
+    .split('\0')
+    .map(entry => entry.split('\n').filter(Boolean))
+    .filter(lines => lines.length > 0)
+    .map(([subject, ...files]) => ({ subject: subject.trim(), files }))
+    .filter(({ subject }) => subject && !/^Release v/.test(subject))
+    .filter(({ files }) => files.some(shipsToUsers))
+    .map(({ subject }) => subject)
 }
 
 export function writeChangelog(root, version, entries) {
