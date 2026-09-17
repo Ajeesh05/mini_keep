@@ -1,36 +1,36 @@
 {
-    "manifest_version": 3,
-    "name": "Mini Keep - a compact, popup version of Keep",
-    "version": "1.1.0",
-    "description": "Open Google Keep in a resizable side popup window.",
-    "permissions": [
-        "storage",
-        "windows",
-        "system.display"
-    ],
-    "background": {
-        "service_worker": "background.js"
+  "manifest_version": 3,
+  "name": "Mini Keep - a compact, popup version of Keep",
+  "version": "1.1.1",
+  "description": "Open Google Keep in a resizable side popup window.",
+  "permissions": [
+    "storage",
+    "windows",
+    "system.display"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_title": "Open Google Keep"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+K"
+      },
+      "description": "Open Keep popup"
     },
-    "icons": {
-        "16": "icon16.png",
-        "48": "icon48.png",
-        "128": "icon128.png"
-    },
-    "action": {
-        "default_title": "Open Google Keep"
-    },
-    "commands": {
-        "_execute_action": {
-            "suggested_key": {
-                "default": "Alt+K"
-            },
-            "description": "Open Keep popup"
-        },
-        "close-keep": {
-            "suggested_key": {
-                "default": "Alt+Shift+K"
-            },
-            "description": "Close Keep popup"
-        }
+    "close-keep": {
+      "suggested_key": {
+        "default": "Alt+Shift+K"
+      },
+      "description": "Close Keep popup"
     }
+  }
 }
