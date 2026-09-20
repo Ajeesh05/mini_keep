@@ -157,7 +157,10 @@ jobs:
             that it needs /approve-permissions first.
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 25
+            # An audit reads widely before it can say anything useful: the first
+            # real run finished its work in 28 turns and was failed by a cap of
+            # 25, after it had already filed correct findings.
+            --max-turns 45
             --allowedTools "Bash,Read,Glob,Grep"
           settings: |
             {
