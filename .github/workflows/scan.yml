@@ -1,0 +1,185 @@
+# The proposal scanner.
+#
+# Wakes on a schedule, audits this project, and files what it finds as issues
+# assigned to you. Nothing it files is acted on until you comment /approve.
+#
+# Audit mode is enforced, not merely requested: the agent is denied Edit and
+# Write entirely, so it can read the code and open issues and nothing else.
+# Findings are grounded in things that can be checked - a broken API call, a
+# missing permission, an innerHTML sink - rather than in opinions about what
+# would be nice.
+#
+# Source of truth is ext-automation/templates/scan.yml. The cron line is the one
+# thing each project sets for itself, so the fleet rotates instead of all
+# waking at once.
+name: Scan
+
+on:
+  schedule:
+    - cron: "0 1 * * 1,4"
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: Narrow the audit to one area (optional)
+        required: false
+
+concurrency:
+  group: ai-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Gather what the tooling already knows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Run the checks first and hand the agent their output. A scanner that
+          # re-derives what the linter already knows wastes a run; one that reads
+          # the linter's output can explain *why* something matters.
+          {
+            echo "## Lint"; npm run lint 2>&1 | tail -30 || true
+            echo; echo "## Manifest"; npm run manifest 2>&1 | tail -30 || true
+            echo; echo "## Permission gate"; npm run permissions 2>&1 | tail -10 || true
+            echo; echo "## Tests"; npm test 2>&1 | tail -15 || true
+          } > /tmp/tooling.txt
+          cat /tmp/tooling.txt
+
+          # Existing proposals, so the agent does not re-file what is already open.
+          gh issue list --state open --limit 50 --json number,title \
+            --jq '.[] | "#\(.number) \(.title)"' > /tmp/open-issues.txt || true
+          echo "--- open issues ---"; cat /tmp/open-issues.txt
+
+      - name: Audit
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Audit this extension and file what you find as GitHub issues.
+
+            You are in audit mode. Read code, open issues. Change nothing - you
+            have no file-writing tools, by design.
+
+            Read CLAUDE.md first: it records this project's architecture, its
+            invariants, and the defects already known about. Do not re-file
+            anything it already lists as known.
+
+            The checks have already run; their output is in /tmp/tooling.txt.
+            Open issues are in /tmp/open-issues.txt - do not duplicate them.
+
+            ## What to look for
+
+            Ordered by how much they matter:
+
+            1. Code that cannot work - an API called without its permission
+               declared, a function that does not exist, a listener that can
+               never fire.
+            2. Security: innerHTML and similar sinks fed by data you do not
+               control, over-broad host permissions, secrets in source.
+            3. Manifest V3 correctness - APIs that need a newer Chrome than
+               declared, service worker lifecycle assumptions that MV3 breaks
+               (long timers, in-memory state expected to persist).
+            4. Missing error handling on anything that can genuinely fail:
+               storage quota, a tab closing mid-operation, a rejected API call.
+            5. Chrome Web Store policy risk - permissions that are requested but
+               unused, a description that does not match behaviour.
+            6. Gaps in test coverage where a real bug could hide.
+            7. Dead code and clear technical debt.
+
+            Do not propose features. Do not propose adopting a bundler, a
+            framework, or TypeScript. Do not propose style changes.
+
+            ## What makes a finding worth filing
+
+            You must be able to say what breaks, for whom, and how you know. If
+            the honest answer is "nothing observable", it is not worth an issue.
+            Read the actual code before claiming anything - the tooling output
+            tells you where to look, not what is true.
+
+            ## How to file
+
+            At most 3 issues. Fewer is fine. None is fine, and is the right
+            answer for a clean project - say so in your final message rather
+            than inventing something.
+
+            For each, use:
+
+              gh issue create --title "..." --body-file <file> \
+                --label "ai-proposal,awaiting-approval,<kind>,<risk>" \
+                --assignee "${{ github.repository_owner }}"
+
+            kind is one of kind:bug kind:security kind:perf kind:ux kind:debt
+            kind:compliance. risk is one of risk:low risk:medium risk:high.
+
+            Write each body in this shape:
+
+              ## Context
+              What is true today. Name files and line numbers. Quote the code.
+
+              ## Why it matters
+              What breaks, for whom. If you are unsure of the impact, say so
+              plainly rather than overstating it.
+
+              ## Ask
+              What to change, concretely enough that someone could implement it
+              without rediscovering the problem.
+
+              ## Acceptance criteria
+              - `npm run check` and `npm run e2e` pass.
+              - Existing behaviour unchanged except where stated.
+              - No new permissions.
+
+              ## Notes
+              Version bump: patch | minor | major, and why.
+              Anything the implementer should be careful of.
+
+            If a fix would need a new permission, say so explicitly and note
+            that it needs /approve-permissions first.
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 25
+            --allowedTools "Bash,Read,Glob,Grep"
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Edit(**)",
+                  "Write(**)"
+                ]
+              }
+            }
+
+      - name: Note what was filed
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "### Scan complete"
+            echo
+            echo "Open proposals now awaiting you:"
+            echo
+            gh issue list --state open --label awaiting-approval \
+              --json number,title,labels \
+              --jq '.[] | "- #\(.number) \(.title)"' || echo "(none)"
+          } >> "$GITHUB_STEP_SUMMARY"
