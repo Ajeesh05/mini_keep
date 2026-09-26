@@ -40,7 +40,31 @@ const ALWAYS_EXCLUDE_FILES = [
   '.gitignore'
 ]
 
-function shouldSkip(relPath, extraDirs, extraFiles) {
+/**
+ * File types a browser extension can actually use.
+ *
+ * The rest of this function is a deny-list, which means anything a tool drops
+ * into the tree ships unless someone thought to name it. That is how a gitleaks
+ * SARIF report - the secret scanner's own output - ended up inside a packaged
+ * extension: CI wrote results.sarif to the repo root and the packer had no
+ * opinion about it. That particular report was clean, but the same path would
+ * have published matched secret fragments and internal file paths to anyone who
+ * downloaded the extension from the store.
+ *
+ * An allow-list fails the other way: something unusual gets left out, loudly,
+ * rather than something private getting shipped, silently.
+ */
+const SHIPPABLE = new Set([
+  'html', 'htm', 'css', 'js', 'mjs', 'json', 'wasm',
+  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'avif', 'ico', 'bmp',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'mp3', 'ogg', 'wav', 'webm', 'mp4', 'txt'
+])
+
+/** Files left out because their type is not shippable, for the build log. */
+export const skippedByType = []
+
+function shouldSkip(relPath, extraDirs, extraFiles, isDirectory = false) {
   const parts = relPath.split(sep)
   const top = parts[0]
   const name = parts[parts.length - 1]
@@ -57,6 +81,17 @@ function shouldSkip(relPath, extraDirs, extraFiles) {
     if (relPath.endsWith('.zip')) return true
     if (relPath.endsWith('.md')) return true
   }
+
+  // Directories are traversed; only the files inside them are judged on type.
+  if (isDirectory) return false
+
+  const dot = name.lastIndexOf('.')
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+  if (!SHIPPABLE.has(ext)) {
+    skippedByType.push(relPath)
+    return true
+  }
+
   return false
 }
 
@@ -68,9 +103,10 @@ export function collectFiles(root, { extraDirs = [], extraFiles = [] } = {}) {
     for (const entry of readdirSync(dir)) {
       const abs = join(dir, entry)
       const rel = relative(root, abs)
-      if (shouldSkip(rel, extraDirs, extraFiles)) continue
+      const isDirectory = statSync(abs).isDirectory()
+      if (shouldSkip(rel, extraDirs, extraFiles, isDirectory)) continue
 
-      if (statSync(abs).isDirectory()) walk(abs)
+      if (isDirectory) walk(abs)
       else out.push(rel)
     }
   }
@@ -132,12 +168,22 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const dirIdx = args.indexOf('--dir')
   const zipIdx = args.indexOf('--zip')
 
+  /** Anything left out for its type is said out loud, never dropped quietly. */
+  const reportSkipped = () => {
+    const unique = [...new Set(skippedByType)].sort()
+    if (unique.length) {
+      console.log(`left out, not a shippable file type: ${unique.join(', ')}`)
+    }
+  }
+
   if (dirIdx >= 0) {
     const files = packDir(root, args[dirIdx + 1])
     console.log(`packed ${files.length} files -> ${args[dirIdx + 1]}`)
+    reportSkipped()
   } else if (zipIdx >= 0) {
     const files = packZip(root, args[zipIdx + 1])
     console.log(`packed ${files.length} files (v${readManifestVersion(root)}) -> ${args[zipIdx + 1]}`)
+    reportSkipped()
   } else {
     console.log(collectFiles(root).join('\n'))
   }
