@@ -100,7 +100,10 @@ function createStorageArea(initial = {}, runtimeRef) {
       return out
     }),
     set: areaSpy(async items => {
+      const changes = {}
+      for (const [k, v] of Object.entries(items)) changes[k] = { oldValue: store[k], newValue: v }
       store = { ...store, ...items }
+      if (area._onChanged) area._onChanged(changes)
     }),
     remove: areaSpy(async keys => {
       for (const k of [].concat(keys)) delete store[k]
@@ -108,6 +111,20 @@ function createStorageArea(initial = {}, runtimeRef) {
     clear: areaSpy(async () => {
       store = {}
     }),
+    /**
+     * Approximates chrome.storage.*.getBytesInUse.
+     *
+     * Chrome counts each key plus its JSON value; that is close enough for a
+     * test that only needs the figure to move when data is added or removed.
+     */
+    getBytesInUse: areaSpy(async keys => {
+      const wanted = keys === null || keys === undefined
+        ? Object.keys(store)
+        : [].concat(keys).filter(k => k in store)
+      return wanted.reduce((n, k) => n + k.length + JSON.stringify(store[k] ?? null).length, 0)
+    }),
+    /** Set by createChromeMock so writes reach chrome.storage.onChanged. */
+    _onChanged: null,
     /** Test-only: read the backing object directly. */
     _dump: () => ({ ...store }),
     _seed: next => {
@@ -174,6 +191,7 @@ export function createChromeMock(opts = {}) {
       session: createStorageArea({}, runtimeRef),
       onChanged: createEvent()
     },
+
 
     windows: {
       WINDOW_ID_NONE: -1,
@@ -256,6 +274,12 @@ export function createChromeMock(opts = {}) {
         getInfo: spy(async () => state.displays.map(d => ({ ...d })), runtimeRef)
       }
     }
+  }
+
+  // A write to any area now reaches chrome.storage.onChanged, the way
+  // extensions learn that a setting was changed from another page.
+  for (const name of ['sync', 'local', 'session']) {
+    chrome.storage[name]._onChanged = changes => chrome.storage.onChanged.emit(changes, name)
   }
 
   built = chrome

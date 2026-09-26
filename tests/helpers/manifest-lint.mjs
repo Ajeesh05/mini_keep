@@ -90,6 +90,30 @@ function usedNamespaces(root) {
   return used
 }
 
+/**
+ * Files that read a tab field only granted by the "tabs" permission.
+ *
+ * chrome.tabs works without that permission - which is why it is not in
+ * PERMISSION_APIS - but url, title, pendingUrl and favIconUrl come back
+ * undefined instead of throwing. Code that reads them keeps running and
+ * quietly does nothing, which is far harder to notice than a failed call.
+ *
+ * @param {string} root
+ *
+ * @returns {string[]} repo-relative paths
+ */
+function filesReadingTabUrl(root) {
+  const reads = /\b(?:tab|tabs\[\d+\]|activeTab)\s*(?:\?\.|\.)\s*(?:url|title|pendingUrl|favIconUrl)\b/
+  const files = []
+
+  for (const file of sourceFiles(root)) {
+    const src = readFileSync(file, 'utf8')
+    if (/\bchrome\.tabs\b/.test(src) && reads.test(src)) files.push(relative(root, file))
+  }
+
+  return files
+}
+
 /** Declared paths that must exist on disk. */
 function declaredPaths(manifest) {
   const paths = []
@@ -161,6 +185,27 @@ export function lintManifest(root) {
   const permissions = new Set(manifest.permissions ?? [])
   const used = usedNamespaces(root)
   const minChrome = Number(manifest.minimum_chrome_version ?? 0)
+
+  // "tabs" is deliberately absent from PERMISSION_APIS: chrome.tabs is callable
+  // without it. What it withholds are the tab fields below, which arrive as
+  // undefined - so the call appears to succeed and the feature silently stops.
+  if (used.has('tabs') && !permissions.has('tabs')) {
+    const readers = filesReadingTabUrl(root)
+    for (const file of readers) {
+      err(
+        'undeclared-tabs-permission',
+        `${file} reads a tab's url/title, but "tabs" is not in permissions - ` +
+        'those fields will be undefined at runtime, with no error'
+      )
+    }
+    if (readers.length === 0) {
+      warn(
+        'undeclared-tabs-permission',
+        `${used.get('tabs')} uses chrome.tabs without the "tabs" permission - ` +
+        'fine unless it starts reading tab.url or tab.title'
+      )
+    }
+  }
 
   for (const [ns, file] of used) {
     if (PERMISSION_APIS.includes(ns) && !permissions.has(ns)) {
